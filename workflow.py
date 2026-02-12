@@ -15,20 +15,28 @@ import streamlit as st
 
 load_dotenv()
 
-if "OPENAI_API_KEY" in st.secrets["secrets"]:
-    OPENAI_API_KEY = st.secrets['secrets'].get("OPENAI_API_KEY")
-else:
-    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+def get_secret(key):
+    """Robustly retrieve secrets from Streamlit secrets (Cloud/Local) or Environment."""
+    try:
+        # Try direct access (Streamlit Cloud Dashboard)
+        if key in st.secrets:
+            return st.secrets[key]
+        # Try nested access (local secrets.toml with [secrets] section)
+        if "secrets" in st.secrets and key in st.secrets["secrets"]:
+            return st.secrets["secrets"][key]
+    except Exception:
+        pass
+    # Fallback to env var
+    return os.getenv(key)
 
-if "TAVILY_API_KEY" in st.secrets["secrets"]:
-    TAVILY_API_KEY = st.secrets['secrets'].get("TAVILY_API_KEY")
-else:
-    TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+# Set into environment for LangChain tools and clients to pick up automatically
+OPENAI_API_KEY = get_secret("OPENAI_API_KEY")
+TAVILY_API_KEY = get_secret("TAVILY_API_KEY")
+OPENFDA_API_KEY = get_secret("OPENFDA_API_KEY")
 
-if "OPENFDA_API_KEY" in st.secrets["secrets"]:
-    OPENFDA_API_KEY = st.secrets['secrets'].get("OPENFDA_API_KEY")
-else:
-    OPENFDA_API_KEY = os.getenv("OPENFDA_API_KEY")
+if OPENAI_API_KEY: os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
+if TAVILY_API_KEY: os.environ["TAVILY_API_KEY"] = TAVILY_API_KEY
+if OPENFDA_API_KEY: os.environ["OPENFDA_API_KEY"] = OPENFDA_API_KEY
 
 # Initialize LLMs
 cache = InMemoryCache()
@@ -36,12 +44,17 @@ llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.6, api_key=OPENAI_API_KEY, c
 embeddings = OpenAIEmbeddings(model="text-embedding-ada-002", api_key=OPENAI_API_KEY)
 
 def get_tavily_tool():
-    key = st.secrets['secrets']['TAVILY_API_KEY']
-    if not key: return None
-    try:
-        return TavilySearchResults(api_key=key, max_results=2)
-    except Exception:
+    if not os.environ.get("TAVILY_API_KEY"):
         return None
+    try:
+        # Attempt initialization. LangChain tools ideally pick up the ENV variable.
+        return TavilySearchResults(max_results=2)
+    except Exception:
+        try:
+            # Fallback for older package versions or specialized strict Pydantic models
+            return TavilySearchResults(tavily_api_key=os.environ["TAVILY_API_KEY"], max_results=2)
+        except Exception:
+            return None
 
 tavily_search_tool = get_tavily_tool()
 
@@ -448,34 +461,40 @@ def fetch_medical_literature(state: AgentState) -> dict:
         verdict = "INCORRECT"
     
     # Fallback: Web-based retrieval using TavilySearch if verdict is either INCORRECT or AMBIGUOUS
-    if verdict in ["INCORRECT", "AMBIGUOUS"]:
-        web_results = tavily_search_tool.run(search_query)
-        
-        if isinstance(web_results, dict) and "results" in web_results:
-            web_results = web_results["results"]
-        elif isinstance(web_results, list):
-            web_results = web_results
-        else:
-            web_results = []
-
-        retrieved_docs = []
-        
-        for res in web_results:
-            title = res.get("title", "")
-            url = res.get("url", "")
-            content = res.get("content", "") or res.get("snippet", "")
-            full_text = f"{title}\nURL: {url}\n\n{content}"
+    if verdict in ["INCORRECT", "AMBIGUOUS"] and tavily_search_tool:
+        try:
+            web_results = tavily_search_tool.run(search_query)
             
-            retrieved_docs.append(
-                Document(
-                    page_content=full_text.strip(),
-                    metadata={
-                        "source": "Web/TavilySearch",
-                        "url": url,
-                        "title": title
-                    }
-                )
+            if isinstance(web_results, dict) and "results" in web_results:
+                web_results = web_results["results"]
+            elif isinstance(web_results, list):
+                web_results = web_results
+            else:
+                web_results = []
+        except Exception as e:
+            print(f"Tavily search failed: {e}")
+            web_results = []
+    else:
+        web_results = []
+
+    retrieved_docs = []
+    
+    for res in web_results:
+        title = res.get("title", "")
+        url = res.get("url", "")
+        content = res.get("content", "") or res.get("snippet", "")
+        full_text = f"{title}\nURL: {url}\n\n{content}"
+        
+        retrieved_docs.append(
+            Document(
+                page_content=full_text.strip(),
+                metadata={
+                    "source": "Web/TavilySearch",
+                    "url": url,
+                    "title": title
+                }
             )
+        )
             
     if verdict == "CORRECT":
         final_relevant_docs = good_docs
