@@ -3,13 +3,13 @@ from pydantic import BaseModel, Field, computed_field, model_validator
 from typing import List, Optional, Dict, Any, Literal
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.cache import InMemoryCache
+from langchain_community.tools.tavily_search import TavilySearchResults
 from langchain_core.prompts import ChatPromptTemplate, HumanMessagePromptTemplate, SystemMessagePromptTemplate
 import os, re, requests
 from dotenv import load_dotenv
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
-from langchain_tavily import TavilySearch
 from xml.etree import ElementTree as ET
 import streamlit as st
 
@@ -34,6 +34,16 @@ else:
 cache = InMemoryCache()
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.6, api_key=OPENAI_API_KEY, cache=cache)
 embeddings = OpenAIEmbeddings(model="text-embedding-ada-002", api_key=OPENAI_API_KEY)
+
+def get_tavily_tool():
+    key = st.secrets['secrets']['TAVILY_API_KEY']
+    if not key: return None
+    try:
+        return TavilySearchResults(api_key=key, max_results=2)
+    except Exception:
+        return None
+
+tavily_search_tool = get_tavily_tool()
 
 # Define Pydantic models
 class PatientProfile(BaseModel):
@@ -439,12 +449,18 @@ def fetch_medical_literature(state: AgentState) -> dict:
     
     # Fallback: Web-based retrieval using TavilySearch if verdict is either INCORRECT or AMBIGUOUS
     if verdict in ["INCORRECT", "AMBIGUOUS"]:
-        tavily = TavilySearch(api_key=TAVILY_API_KEY, search_kwargs={"max_results": 5})
-        web_results = tavily.invoke({"query": search_query})
+        web_results = tavily_search_tool.run(search_query)
         
+        if isinstance(web_results, dict) and "results" in web_results:
+            web_results = web_results["results"]
+        elif isinstance(web_results, list):
+            web_results = web_results
+        else:
+            web_results = []
+
         retrieved_docs = []
         
-        for res in web_results["results"]:
+        for res in web_results:
             title = res.get("title", "")
             url = res.get("url", "")
             content = res.get("content", "") or res.get("snippet", "")
