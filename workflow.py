@@ -439,7 +439,7 @@ def fetch_medical_literature(state: AgentState) -> dict:
     
     # Fallback: Web-based retrieval using TavilySearch if verdict is either INCORRECT or AMBIGUOUS
     if verdict in ["INCORRECT", "AMBIGUOUS"]:
-        tavily = TavilySearch(max_results=5)
+        tavily = TavilySearch(max_results=5, api_key=TAVILY_API_KEY)
         web_results = tavily.invoke({"query": search_query})
         
         retrieved_docs = []
